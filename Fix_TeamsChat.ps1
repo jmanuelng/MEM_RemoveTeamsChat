@@ -18,50 +18,129 @@ For more information and original scripts by Andrew Taylor, visit:
 - GitHub repository: https://github.com/andrew-s-taylor/public/blob/main/Powershell%20Scripts/Intune/Teams-Chat/remediate-teams-chat.ps1
 #>
 
+# Initialize execution summary variable. 
+# Will collect brief messages of actions and errors, helps troubleshoot easily even directly form Microsoft Intune console.
+$execSummary = @()
+
+# Allows for disgnostics log. Non-zero = error at some point of execution.
+$status = 0
+
 # Define the application identifier for Microsoft Teams Chat
 $MSTeams = "MicrosoftTeams"
 
-# Retrieve Microsoft Teams Chat package information for all users
-$WinPackage = Get-AppxPackage -allusers | Where-Object {$_.Name -eq $MSTeams}
+# Retrieve Microsoft Teams Chat package information for all users.
+try {
+    $WinPackage = Get-AppxPackage -allusers | Where-Object {$_.Name -eq $MSTeams}
+    $execSummary += "Retrieved WinPkg"
+} catch {
+    $execSummary += "WinPkg Error"
+    $status = 1
+}
 
 # Retrieve the provisioned Microsoft Teams Chat package from the Windows image
 # Unlike the installed package, the provisioned package refers to the app's inclusion in the system's image, allowing it to be automatically installed for new user accounts. Removing this package prevents automatic installation for future users.
-$ProvisionedPackage = Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -eq $MSTeams }
+try {
+    $ProvisionedPackage = Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -eq $MSTeams }
+    $execSummary += "Retrieved ProvPkg"
+    $status = 0
+} catch {
+    $execSummary += "ProvPkg Error"
+    $status = 1
+}
 
 # If the installed package is found, remove it for all users
-If ($null -ne $WinPackage) {
-    Remove-AppxPackage -Package $WinPackage.PackageFullName -AllUsers
-    # This command uninstalls the app package from all user accounts on the machine
+try {
+    If ($null -ne $WinPackage) {
+        Remove-AppxPackage -Package $WinPackage.PackageFullName -AllUsers
+        # This command uninstalls the app package from all user accounts on the machine
+        $execSummary += "Removed WinPkg"
+        # If it can remove app then previous errors are irrelevant. So status goes back to 0
+        $status = 0
+    }
+} catch {
+    $execSummary += "Remove WinPkg Err"
+    $status = 2
 }
 
 # If the provisioned package is found, remove it
-If ($null -ne $ProvisionedPackage) {
-    Remove-AppxProvisionedPackage -online -Packagename $ProvisionedPackage.Packagename -AllUsers
-    # This command removes the provisioned package, preventing its automatic installation for new users
+try {
+    If ($null -ne $ProvisionedPackage) {
+        Remove-AppxProvisionedPackage -online -Packagename $ProvisionedPackage.Packagename -AllUsers
+        # This command removes the provisioned package, preventing its automatic installation for new users
+        $execSummary += "Removed ProvPkg"
+    }
+} catch {
+    $execSummary += "Rmv ProvPkg Err"
+    $status = 2
 }
 
-# Modify registry permissions to enable further configurations
+### Modify registry permissions to enable further configurations
 $registryPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Communications"
-$acl = Get-Acl -Path $registryPath
-$acl.SetOwner([System.Security.Principal.NTAccount]"Administrators")
-Set-Acl -Path $registryPath -AclObject $acl
-# This section adjusts the ownership of the registry path, allowing administrators to make changes
+try {
+    # Dynamically identify the name of the Administrators group regardless of the system language.
+    # The well-known SID for the Administrators group (S-1-5-32-544) is consistent across Windows installations.
+    $adminGroupName = (New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-544")).Translate([System.Security.Principal.NTAccount]).Value
+
+    # Store the identified name of the Administrators group in a variable for later use.
+    $adminGroup = [System.Security.Principal.NTAccount]$adminGroupName
+
+    # Retrieve the current Access Control List (ACL) for the registry path.
+    $acl = Get-Acl -Path $registryPath
+    # Set the owner of the registry key to the 'Administrators' group.
+    # Without permissions, registry modifications fail.
+    $acl.SetOwner($adminGroup)
+    # Apply the modified ACL back to the registry path.
+    # This updates permissions on registry key, gives access to make changes.
+    Set-Acl -Path $registryPath -AclObject $acl -ErrorAction Stop
+    # Log successful modification of ACL settings.
+    $execSummary += "Set ACL"
+} catch {
+    $execSummary += "Set ACL Error"
+    $status = 3
+}
+## #This section adjusts the ownership of the registry path, allowing administrators to make changes
 
 # Ensure the Communications registry key exists and disable Teams Chat auto-installation
-If (!(Test-Path $registryPath)) { 
-    New-Item $registryPath
+try {
+    # Disable Teams Chat auto-installation
+    If (!(Test-Path $registryPath)) { 
+        New-Item $registryPath
+    }
+    Set-ItemProperty $registryPath ConfigureChatAutoInstall -Value 0 -ErrorAction Stop
+    $execSummary += "Disabled AutoInstall"
+} catch {
+    $execSummary += "AutoInstall Error"
+    $status = 4
 }
-Set-ItemProperty $registryPath ConfigureChatAutoInstall -Value 0
 # This disables the auto-installation feature for Teams Chat, ensuring it does not get reinstalled automatically
 
-# Ensure the policy for Windows Chat is in place and unpin Teams Chat from the taskbar
-$registryPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Chat"
-If (!(Test-Path $registryPath)) { 
-    New-Item $registryPath
+# Unpin Teams Chat from the taskbar
+try {
+    $registryPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Chat"
+    If (!(Test-Path $registryPath)) { 
+        New-Item $registryPath
+    }
+    Set-ItemProperty $registryPath "ChatIcon" -Value 2 -ErrorAction Stop
+    $execSummary += "Unpinned Chat"
+} catch {
+    $execSummary += "Unpin Error"
+    $status = 5
 }
-Set-ItemProperty $registryPath "ChatIcon" -Value 2
-# This action unpin Teams Chat icon from the taskbar, cleaning up the user interface
 
-# Final message indicating successful removal
-write-host "Removed Teams Chat"
-# Notifies the user of the script's completion and the successful removal of Teams Chat
+# Join summary text
+$execSummary -join ", "
+
+# Final message, notifies script's completionget and execution status.
+if ($status -eq 0) {
+    Write-Host "OK $([datetime]::Now) : Teams Chat removed. Summary = $execSummary."
+    exit 0
+} elseif ($status -eq 3 -or $status -eq 4 -or $status -eq 5) {
+    Write-Host "NOTE $([datetime]::Now) : Potential issues removing Teams Chat. Status = $status. Summary = $execSummary."
+    exit $status
+} else {
+    Write-Host "FAIL $([datetime]::Now) : Error removing Teams Chat. Status = $status. Summary = $execSummary."
+    exit $status
+}exit 1
+
+
+#  Fin!!
