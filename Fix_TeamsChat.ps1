@@ -76,29 +76,49 @@ try {
 
 ### Modify registry permissions to enable further configurations
 $registryPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Communications"
+
+# Dynamically identify the name of the Administrators group regardless of the system language.
+# The well-known SID for the Administrators group is consistent across Windows installations
+$expectedAdminGroupName = (New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-544")).Translate([System.Security.Principal.NTAccount]).Value
+
 try {
-    # Dynamically identify the name of the Administrators group regardless of the system language.
-    # The well-known SID for the Administrators group (S-1-5-32-544) is consistent across Windows installations.
-    $adminGroupName = (New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-544")).Translate([System.Security.Principal.NTAccount]).Value
-
-    # Store the identified name of the Administrators group in a variable for later use.
-    $adminGroup = [System.Security.Principal.NTAccount]$adminGroupName
-
-    # Retrieve the current Access Control List (ACL) for the registry path.
+    # Check current owner of the registry key
     $acl = Get-Acl -Path $registryPath
-    # Set the owner of the registry key to the 'Administrators' group.
-    # Without permissions, registry modifications fail.
-    $acl.SetOwner($adminGroup)
-    # Apply the modified ACL back to the registry path.
-    # This updates permissions on registry key, gives access to make changes.
-    Set-Acl -Path $registryPath -AclObject $acl -ErrorAction Stop
-    # Log successful modification of ACL settings.
-    $execSummary += "Set ACL"
+    $currentOwner = $acl.Owner
+
+
+    # Compare current owner with expected Administrators group
+    if ($currentOwner -ne $expectedAdminGroupName) {
+        # If not matching, attempt to change the owner to Administrators group
+        # Store the identified name of the Administrators group in a variable for later use.
+        $adminGroup = [System.Security.Principal.NTAccount]$expectedAdminGroupName
+        $acl.SetOwner($adminGroup)
+        Set-Acl -Path $registryPath -AclObject $acl -ErrorAction Stop
+        
+        # Verify the change by checking the owner again
+            # Retrieve the current Access Control List (ACL) for the registry path.
+        $acl = Get-Acl -Path $registryPath # Refresh ACL info
+        if ($acl.Owner -eq $expectedAdminGroupName) {
+            # Verification successful
+            Write-Host "Ownership correctly set to Administrators."
+            $execSummary += "Ownership Set Verified"
+        } else {
+            # Verification failed
+            Write-Host "Fail in ownership change."
+            $execSummary += "Ownership Verify Fail"
+            $status = 3
+        }
+    } else {
+        # No change needed, already owned by expected Administrators group
+        Write-Host "Registry key already owned by Administrators. No change needed."
+        $execSummary += "Ownership OK, No Change"
+    }
 } catch {
-    $execSummary += "Set ACL Error"
+    Write-Host "Error setting or verifying ACL."
+    $execSummary += "ACL Error"
     $status = 3
 }
-## #This section adjusts the ownership of the registry path, allowing administrators to make changes
+### This section adjusts the ownership of the registry path, allowing administrators to make changes
 
 # Ensure the Communications registry key exists and disable Teams Chat auto-installation
 try {
@@ -128,7 +148,10 @@ try {
 }
 
 # Join summary text
-$execSummary -join ", "
+$execSummary = $execSummary -join ", "
+
+# Easier to read in log file
+ Write-Host "`n`n"
 
 # Final message, notifies script's completionget and execution status.
 if ($status -eq 0) {
