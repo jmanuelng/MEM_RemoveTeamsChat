@@ -76,9 +76,11 @@ try {
 
 ### Modify registry permissions to enable further configurations
 $registryPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Communications"
+# Convert the PowerShell path to a .NET-compatible format
+$netRegistryPath = $registryPath -replace '^HKLM:\\', '' # Remove 'HKLM:\' prefix
 
 # Dynamically identify the name of the Administrators group regardless of the system language.
-# The well-known SID for the Administrators group is consistent across Windows installations
+# The well-known SID for the Administrators group is consistent across Windows installations.
 $expectedAdminGroupName = (New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-544")).Translate([System.Security.Principal.NTAccount]).Value
 
 try {
@@ -86,17 +88,26 @@ try {
     $acl = Get-Acl -Path $registryPath
     $currentOwner = $acl.Owner
 
-
     # Compare current owner with expected Administrators group
     if ($currentOwner -ne $expectedAdminGroupName) {
         # If not matching, attempt to change the owner to Administrators group
-        # Store the identified name of the Administrators group in a variable for later use.
         $adminGroup = [System.Security.Principal.NTAccount]$expectedAdminGroupName
         $acl.SetOwner($adminGroup)
-        Set-Acl -Path $registryPath -AclObject $acl -ErrorAction Stop
-        
-        # Verify the change by checking the owner again
-            # Retrieve the current Access Control List (ACL) for the registry path.
+        try {
+            Set-Acl -Path $registryPath -AclObject $acl -ErrorAction Stop
+            Write-Host "Attempted set ACL with Set-Acl."
+        } catch {
+            # Fallback to .NET method if Set-Acl fails
+            Write-Host "Set-Acl failed, attempting .NET method."
+            $registryKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($netRegistryPath, $true)
+            $security = $registryKey.GetAccessControl()
+            $security.SetOwner($adminGroup)
+            $registryKey.SetAccessControl($security)
+            $registryKey.Close()
+            Write-Host ".NET fallback to set ACL."
+        }
+
+        # Verification step
         $acl = Get-Acl -Path $registryPath # Refresh ACL info
         if ($acl.Owner -eq $expectedAdminGroupName) {
             # Verification successful
@@ -104,7 +115,7 @@ try {
             $execSummary += "Ownership Set Verified"
         } else {
             # Verification failed
-            Write-Host "Fail in ownership change."
+            Write-Host "Failed in ownership change."
             $execSummary += "Ownership Verify Fail"
             $status = 3
         }
@@ -163,7 +174,6 @@ if ($status -eq 0) {
 } else {
     Write-Host "FAIL $([datetime]::Now) : Error removing Teams Chat. Status = $status. Summary = $execSummary."
     exit $status
-}exit 1
-
+}
 
 #  Fin!!
